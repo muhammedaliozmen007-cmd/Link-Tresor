@@ -971,6 +971,8 @@ class App(BaseTk):
         self.links_list, self.notes_list, self.files_list = lists["links"], lists["notes"], lists["files"]
         self._links, self._files = [], []
         self._link_urls, self._note_paths, self._file_paths = [], [], []
+        self._file_rows = []  # angezeigte Zeilen der Dateien-Box: ⬆ zurück / 📁 Ordner / Datei
+        self.files_cwd = ""  # gerade geöffneter Unterordner von dateien/
         self.links_list.bind("<Double-Button-1>", self._only_on_item(self._open_selected_link))
         self.notes_list.bind("<Double-Button-1>", self._only_on_item(self._open_selected_note))
         self.files_list.bind("<Double-Button-1>", self._only_on_item(self._open_selected_file))
@@ -1259,6 +1261,7 @@ class App(BaseTk):
 
     def select_folder(self, name):
         self.folder = name
+        self.files_cwd = ""
         self.folder_box.set(name)
         self.cfg["folder"] = name
         save_config(self.cfg)
@@ -1459,6 +1462,8 @@ class App(BaseTk):
             APP_NAME, f"{len(items)} Dateien hochladen? Das kann eine Weile dauern.", parent=self
         ):
             return
+        cwd = self.files_cwd  # in den gerade geöffneten Unterordner hochladen
+        items = [(p, "/".join(x for x in (cwd, sub) if x)) for p, sub in items]
         sizes = [os.path.getsize(p) for p, _ in items]
         total = sum(sizes)
 
@@ -1980,10 +1985,11 @@ class App(BaseTk):
         self._note_paths = data["notes"]
         self._files = data["files"]
         self._file_paths = [p for _, p in data["files"]]
+        self._file_rows = self._build_file_rows(data["files"], flat=bool(words))
         for lb, items in (
             (self.links_list, [t for t, _, _ in data["links"]]),
             (self.notes_list, [t for t, _ in data["notes"]]),
-            (self.files_list, [n for n, _ in data["files"]]),
+            (self.files_list, [r["text"] for r in self._file_rows]),
         ):
             lb.delete(0, "end")
             for item in items:
@@ -1991,6 +1997,29 @@ class App(BaseTk):
         self._selected_list = None
         self.delete_btn.state(["disabled"])
         self.edit_btn.state(["disabled"])
+
+    def _build_file_rows(self, files, flat=False):
+        """Dateien als Zeilen: Unterordner zusammengefasst als „📁 Name (n)“, im Ordner „⬆ zurück“."""
+        if flat:  # bei der Suche alle Treffer mit Pfad zeigen
+            return [{"type": "file", "text": label, "item": (label, path)} for label, path in files]
+        cwd = self.files_cwd
+        prefix = cwd + "/" if cwd else ""
+        dirs, rows = {}, []
+        for label, path in files:
+            if not label.startswith(prefix):
+                continue
+            rest = label[len(prefix):]
+            if "/" in rest:
+                d = rest.split("/", 1)[0]
+                dirs[d] = dirs.get(d, 0) + 1
+            else:
+                rows.append({"type": "file", "text": rest, "item": (label, path)})
+        top = []
+        if cwd:
+            top.append({"type": "up", "text": f"⬆  zurück   ({cwd})"})
+        for d in sorted(dirs, key=str.lower):
+            top.append({"type": "dir", "text": f"📁  {d}   ({dirs[d]})", "rel": prefix + d, "count": dirs[d]})
+        return top + rows
 
     def _summary(self):
         d = self.cache.get(self.folder)
@@ -2075,8 +2104,14 @@ class App(BaseTk):
             kind, item = "notes", self._note_paths[i]
             what, job = f"die Notiz „{item[0]}“", lambda: tresor.delete_entry(item[1])
         else:
+            row = self._file_rows[i]
+            if row["type"] == "up":
+                return
+            if row["type"] == "dir":
+                self._delete_files_dir(row)
+                return
             kind = "files"
-            item = self._files[i]
+            item = row["item"]
             what, job = f"die Datei „{item[0]}“", lambda: tresor.delete_entry(item[1])
         if not messagebox.askyesno(APP_NAME, f"Willst du {what} wirklich löschen?", icon="warning", parent=self):
             return
@@ -2099,6 +2134,50 @@ class App(BaseTk):
             self.refresh_overview(quiet=True)
 
         self.run_job("Lösche", job, None, on_error=failed, quiet=True)
+
+    def _delete_files_dir(self, row):
+        rel, folder, tresor = row["rel"], self.folder, self.tresor()
+        if not messagebox.askyesno(
+            APP_NAME,
+            f"Den Ordner „{rel}“ mit allen {row['count']} Dateien wirklich löschen?",
+            icon="warning",
+            parent=self,
+        ):
+            return
+        prefix = rel + "/"
+        data = self.cache.get(folder) or {"files": []}
+        gone = [x for x in data["files"] if x[0].startswith(prefix)]
+        until = time.time() + self.KEEP_SECONDS
+        for x in gone:
+            self.hidden[self._key("files", x)] = until
+        data["files"] = [x for x in data["files"] if not x[0].startswith(prefix)]
+        self._render()
+        self.set_status(f"🗑 Ordner gelöscht: „{rel}“")
+
+        def failed(err):
+            for x in gone:
+                self.hidden.pop(self._key("files", x), None)
+            messagebox.showerror(APP_NAME, f"„{rel}“ konnte nicht gelöscht werden:\n{err}", parent=self)
+            self.refresh_overview(quiet=True)
+
+        self.run_job("Lösche Ordner", lambda: tresor.delete_files_dir(rel), None, on_error=failed, quiet=True)
+
+    def _rename_files_dir(self, row):
+        rel, folder, tresor = row["rel"], self.folder, self.tresor()
+        old_name = rel.rsplit("/", 1)[-1]
+        dlg = NameDialog(self, "Ordner umbenennen", f"Neuer Name für „{old_name}“:", old_name)
+        self.wait_window(dlg)
+        if not dlg.result or dlg.result == old_name:
+            return
+
+        def done(new_rel):
+            data = self.cache.get(folder) or {"files": []}
+            for x in [x for x in data["files"] if x[0].startswith(rel + "/")]:
+                rest = x[0][len(rel):]
+                self._replace_local(folder, "files", x, (new_rel + rest, x[1].replace(f"/{rel}/", f"/{new_rel}/", 1)))
+            self.set_status(f"✔ Ordner umbenannt in „{new_rel.rsplit('/', 1)[-1]}“")
+
+        self.run_job("Benenne Ordner um", lambda: tresor.rename_files_dir(rel, dlg.result), done)
 
     # ------------------------------------------------------- Rechtsklick
     def _context_menu(self, event):
@@ -2127,10 +2206,22 @@ class App(BaseTk):
             open_label, edit_label = "📖  Öffnen", "✎  Bearbeiten"
             opener = self._open_selected_note
         else:
-            menu.add_command(label="＋  Dateien hochladen …", command=self.choose_files)
-            menu.add_command(label="＋  Ordner hochladen …", command=self.choose_folder_upload)
+            where = f" (in „{self.files_cwd}“)" if self.files_cwd else ""
+            menu.add_command(label=f"＋  Dateien hochladen …{where}", command=self.choose_files)
+            menu.add_command(label=f"＋  Ordner hochladen …{where}", command=self.choose_folder_upload)
             open_label, edit_label = "↗  Auf GitHub öffnen", "✎  Umbenennen"
             opener = self._open_selected_file
+            row = self._file_rows[lb.nearest(event.y)] if on_item else None
+            if row and row["type"] == "up":
+                on_item = False
+                menu.add_separator()
+                menu.add_command(label="⬆  Zurück", command=lambda: opener(None))
+            elif row and row["type"] == "dir":
+                on_item = False
+                menu.add_separator()
+                menu.add_command(label="📂  Öffnen", command=lambda: opener(None))
+                menu.add_command(label="✎  Ordner umbenennen", command=lambda r=row: self._rename_files_dir(r))
+                menu.add_command(label="🗑  Ganzen Ordner entfernen", command=lambda r=row: self._delete_files_dir(r))
         if on_item:
             menu.add_separator()
             menu.add_command(label=open_label, command=lambda: opener(None))
@@ -2195,7 +2286,11 @@ class App(BaseTk):
         elif lb is self.notes_list:
             self._edit_note(self._note_paths[i])
         else:
-            self._edit_file(self._files[i])
+            row = self._file_rows[i]
+            if row["type"] == "dir":
+                self._rename_files_dir(row)
+            elif row["type"] == "file":
+                self._edit_file(row["item"])
 
     def _replace_local(self, folder, kind, old, new):
         """Geänderten Eintrag sofort anzeigen (alter verschwindet, neuer an gleicher Stelle)."""
@@ -2286,8 +2381,18 @@ class App(BaseTk):
 
     def _open_selected_file(self, _event):
         sel = self.files_list.curselection()
-        if sel:
-            webbrowser.open(self.client().file_url(self._file_paths[sel[0]]))
+        if not sel:
+            return
+        row = self._file_rows[sel[0]]
+        if row["type"] == "up":
+            self.files_cwd = self.files_cwd.rsplit("/", 1)[0] if "/" in self.files_cwd else ""
+            self._render()
+        elif row["type"] == "dir":
+            self.search_var.set("") if self.search_var.get() else None
+            self.files_cwd = row["rel"]
+            self._render()
+        else:
+            webbrowser.open(self.client().file_url(row["item"][1]))
 
     # ---------------------------------------------- Tabs verschieben
     def _tab_at(self, x, y):

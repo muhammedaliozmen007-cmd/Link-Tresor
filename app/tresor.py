@@ -388,6 +388,29 @@ class Tresor:
         self.gh.delete_file(path, self._msg(f"Datei umbenannt: {old_name}"), sha)
         return new_path
 
+    # ------------------------------------------ Unterordner in dateien/
+    def delete_files_dir(self, rel):
+        """Löscht einen Unterordner von dateien/ samt Inhalt (ein Commit)."""
+        rel = rel.strip("/")
+        if not rel:
+            raise ValueError("Kein Ordner gewählt.")
+        self.gh.delete_dir(f"{self.files_dir}/{rel}", self._msg(f"Ordner gelöscht: dateien/{rel}"))
+
+    def rename_files_dir(self, rel, new_name):
+        """Benennt einen Unterordner von dateien/ um (ein Commit). -> neuer relativer Pfad"""
+        rel = rel.strip("/")
+        new_name = safe_filename(new_name.strip())
+        parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
+        new_rel = f"{parent}/{new_name}" if parent else new_name
+        if new_rel == rel:
+            return rel
+        if self.gh.list_dir(f"{self.files_dir}/{new_rel}"):
+            raise ValueError(f"Den Ordner „{new_name}“ gibt es dort schon.")
+        self.gh.move_dir(
+            f"{self.files_dir}/{rel}", f"{self.files_dir}/{new_rel}", self._msg(f"Ordner umbenannt: {rel} → {new_rel}")
+        )
+        return new_rel
+
     def delete_entry(self, path):
         """Löscht eine Notiz oder Datei."""
         kind = "Notiz" if path.startswith(self.notes_dir + "/") else "Datei"
