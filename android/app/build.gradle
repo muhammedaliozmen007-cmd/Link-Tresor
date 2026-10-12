@@ -1,0 +1,49 @@
+plugins {
+    id "com.android.application"
+}
+
+// Commit-SHA des Builds (in GitHub Actions gesetzt) – daran erkennt „Update“ neue Versionen
+def buildSha = System.getenv("GITHUB_SHA") ?: "dev"
+
+android {
+    namespace "de.linktresor"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "de.linktresor"
+        minSdk 24
+        targetSdk 34
+        versionCode((System.getenv("GITHUB_RUN_NUMBER") ?: "1") as int)
+        versionName buildSha.take(7)
+        buildConfigField "String", "BUILD_SHA", "\"${buildSha}\""
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    // Fester Schlüssel, damit sich neue Versionen über die alte installieren lassen
+    signingConfigs {
+        tresor {
+            storeFile file("link-tresor.jks")
+            storePassword "link-tresor"
+            keyAlias "link-tresor"
+            keyPassword "link-tresor"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.tresor
+        }
+        debug {
+            signingConfig signingConfigs.tresor
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

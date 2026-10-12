@@ -1,0 +1,75 @@
+name: Windows-EXE bauen
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - ".github/workflows/build-exe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Builds nacheinander ausführen, damit das Release immer die neueste Version enthält
+concurrency:
+  group: build-exe
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Abhängigkeiten installieren
+        run: pip install pyinstaller tkinterdnd2
+
+      - name: Versionsnummer eintragen
+        shell: bash
+        run: echo 'BUILD_SHA = "${{ github.sha }}"' > app/version.py
+
+      - name: EXE bauen
+        working-directory: app
+        run: >
+          pyinstaller --onefile --windowed --noconfirm
+          --name Link-Tresor
+          --icon icon.ico
+          --add-data "icon.ico;."
+          --add-data "logo-32.png;."
+          --add-data "logo-48.png;."
+          --add-data "logo-64.png;."
+          --add-data "gear-16.png;."
+          --add-data "gear-20.png;."
+          --add-data "gear-24.png;."
+          --add-data "gear-32.png;."
+          --collect-all tkinterdnd2
+          link_tresor.pyw
+
+      - name: Als Build-Artefakt hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: Link-Tresor-exe
+          path: app/dist/Link-Tresor.exe
+
+      - name: Alte Version unter "Releases" entfernen
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete latest --cleanup-tag --yes --repo ${{ github.repository }}; exit 0
+
+      - name: Als Download unter "Releases" bereitstellen
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          target_commitish: ${{ github.sha }}
+          name: Link-Tresor (neueste Version)
+          body: |
+            **Link-Tresor.exe** herunterladen und doppelklicken – keine Installation nötig.
+            Automatisch gebaut aus Commit ${{ github.sha }}.
+          prerelease: false
+          make_latest: true
+          files: app/dist/Link-Tresor.exe
