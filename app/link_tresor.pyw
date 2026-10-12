@@ -179,6 +179,15 @@ def apply_dark_theme(root):
         indicatorbackground=[("selected", C["accent"])],
     )
 
+    style.configure(
+        "Horizontal.TProgressbar",
+        background=C["accent"],
+        troughcolor=C["field"],
+        bordercolor=C["border"],
+        lightcolor=C["accent"],
+        darkcolor=C["accent"],
+    )
+
     style.configure("TNotebook", background=C["bg"], bordercolor=C["bg"], tabmargins=(0, 0, 0, 0))
     style.configure(
         "TNotebook.Tab",
@@ -696,8 +705,17 @@ class App(BaseTk):
         self._build_youtube_tab()
         self._build_mp3_tab()
 
+        # Fortschrittsleiste für Up-/Downloads (nur sichtbar, solange etwas läuft)
+        self.transfer = ttk.Frame(self, padding=(16, 0, 16, 6))
+        self.transfer_bar = ttk.Progressbar(self.transfer, mode="determinate", maximum=1000)
+        self.transfer_bar.pack(fill="x")
+        self.transfer_label = ttk.Label(self.transfer, text="", style="Status.TLabel")
+        self.transfer_label.pack(fill="x", pady=(2, 0))
+        self._transfer_state = None
+
         self.status = ttk.Label(self, text="Bereit.", style="Status.TLabel", padding=(16, 0, 16, 10))
-        self.status.pack(fill="x")
+        # unten verankern (vor den Tabs packen), sonst drücken die Tabs Status und Leiste aus dem Fenster
+        self.status.pack(fill="x", side="bottom", before=self.tabs)
 
         self.tabs.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         self._apply_tab_order()
@@ -994,6 +1012,58 @@ class App(BaseTk):
 
     def set_status(self, text):
         self.status.config(text=text)
+
+    # ----------------------------------------------- Fortschrittsleiste
+    @staticmethod
+    def _fmt_bytes(n):
+        return f"{n / 1048576:.1f} MB".replace(".", ",") if n >= 1048576 else f"{max(n, 0) // 1024} KB"
+
+    @staticmethod
+    def _fmt_eta(seconds):
+        if seconds is None or seconds < 0:
+            return ""
+        seconds = int(seconds + 0.5)
+        if seconds < 60:
+            return f"noch ca. {max(seconds, 1)} s"
+        return f"noch ca. {seconds // 60} min {seconds % 60:02d} s"
+
+    def transfer_start(self, title):
+        """Leiste einblenden (aus dem UI-Thread)."""
+        self._transfer_state = {"title": title, "start": time.time(), "shown": 0.0}
+        self.transfer_bar.config(value=0)
+        self.transfer_label.config(text=f"{title} …")
+        self.transfer.pack(fill="x", side="bottom", after=self.status)
+
+    def transfer_progress(self, done=0, total=0, percent=None, eta=None, note=""):
+        """Fortschritt melden – darf aus Hintergrund-Threads aufgerufen werden."""
+        self.jobs.put(("call", lambda: self._transfer_show(done, total, percent, eta, note)))
+
+    def _transfer_show(self, done, total, percent, eta, note):
+        st = self._transfer_state
+        if not st:
+            return
+        now = time.time()
+        if now - st["shown"] < 0.15 and not (total and done >= total):
+            return  # nicht zu oft neu zeichnen
+        st["shown"] = now
+        if percent is None:
+            percent = done * 100 / total if total else 0
+        if eta is None and total and done:
+            elapsed = now - st["start"]
+            eta = (total - done) * elapsed / done if elapsed > 0.5 else None
+        parts = [f"{st['title']}: {percent:.0f} %"]
+        if total:
+            parts.append(f"{self._fmt_bytes(done)} von {self._fmt_bytes(total)}")
+        if self._fmt_eta(eta):
+            parts.append(self._fmt_eta(eta))
+        if note:
+            parts.append(note)
+        self.transfer_bar.config(value=min(1000, percent * 10))
+        self.transfer_label.config(text=" · ".join(parts))
+
+    def transfer_end(self):
+        self._transfer_state = None
+        self.transfer.pack_forget()
 
     def run_job(self, label, func, on_done=None, on_error=None, quiet=False):
         """Führt func im Hintergrund aus, damit die Oberfläche nicht einfriert."""
@@ -1318,8 +1388,10 @@ class App(BaseTk):
         def progress(done, total):
             if total:
                 self.jobs.put(("status", f"Lade Update herunter … {done * 100 // total} %"))
+                self.transfer_progress(done, total)
 
         def installed(exe):
+            self.transfer_end()
             self.set_status("Starte neu …")
             try:
                 updater.restart(exe)
@@ -1330,6 +1402,7 @@ class App(BaseTk):
             self.destroy()
 
         def failed(err):
+            self.transfer_end()
             self.set_status("Update fehlgeschlagen.")
             messagebox.showerror(
                 APP_NAME,
@@ -1338,6 +1411,7 @@ class App(BaseTk):
             )
             webbrowser.open(release.get("html_url", ""))
 
+        self.transfer_start("⬇ Update")
         self.run_job("Lade Update herunter", lambda: updater.install(client, asset, progress), installed, failed)
 
     # ------------------------------------------------------------- Inhalte
@@ -1346,35 +1420,83 @@ class App(BaseTk):
         if paths:
             self.upload_files(list(paths))
 
+    def choose_folder_upload(self):
+        folder = filedialog.askdirectory(parent=self, title="Ordner für den Tresor auswählen")
+        if folder:
+            self.upload_files([folder])
+
     def _on_drop(self, event):
-        self.upload_files([p for p in self.tk.splitlist(event.data) if os.path.isfile(p)])
+        self.upload_files([p for p in self.tk.splitlist(event.data) if os.path.exists(p)])
+
+    @staticmethod
+    def _expand_uploads(paths):
+        """Dateien und Ordner -> [(datei, unterordner)]; Ordner behalten ihren Namen und ihre Struktur."""
+        items = []
+        for p in paths:
+            p = os.path.abspath(p)
+            if os.path.isfile(p):
+                items.append((p, ""))
+            elif os.path.isdir(p):
+                parent = os.path.dirname(p)
+                for root, dirs, files in os.walk(p):
+                    dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+                    for name in sorted(files):
+                        if name.startswith(".") or name.lower() in ("thumbs.db", "desktop.ini"):
+                            continue
+                        rel = os.path.relpath(root, parent).replace(os.sep, "/")
+                        items.append((os.path.join(root, name), rel))
+        return items
 
     def upload_files(self, paths):
         tresor = self._tresor_or_warn()
         if not tresor or not paths:
             return
+        items = self._expand_uploads(paths)
+        if not items:
+            messagebox.showinfo(APP_NAME, "Der Ordner ist leer.", parent=self)
+            return
+        if len(items) > 50 and not messagebox.askyesno(
+            APP_NAME, f"{len(items)} Dateien hochladen? Das kann eine Weile dauern.", parent=self
+        ):
+            return
+        sizes = [os.path.getsize(p) for p, _ in items]
+        total = sum(sizes)
 
         def job():
-            saved, failed = [], []
-            for i, p in enumerate(paths, 1):
-                self.jobs.put(("status", f"Lade hoch ({i}/{len(paths)}): {os.path.basename(p)} …"))
+            saved, failed, done_bytes = [], [], 0
+            for i, ((p, sub), size) in enumerate(zip(items, sizes), 1):
+                name = f"{sub}/{os.path.basename(p)}" if sub else os.path.basename(p)
+                self.jobs.put(("status", f"Lade hoch ({i}/{len(items)}): {name} …"))
+
+                def progress(sent, length, base=done_bytes, size=size, i=i):
+                    self.transfer_progress(base + size * sent // max(length, 1), total, note=f"Datei {i}/{len(items)}")
+
                 try:
-                    saved.append(tresor.add_file(p))
+                    saved.append(tresor.add_file(p, sub, progress))
                 except Exception as e:  # noqa: BLE001
-                    failed.append(f"{os.path.basename(p)}: {e}")
+                    failed.append(f"{name}: {e}")
+                done_bytes += size
+                self.transfer_progress(done_bytes, total, note=f"Datei {i}/{len(items)}")
             return saved, failed
 
         folder = self.folder
+        files_dir = tresor.files_dir
 
         def done(result):
+            self.transfer_end()
             saved, failed = result
             self.set_status(f"✔ {len(saved)} Datei(en) hochgeladen in „{folder}“.")
             for path in saved:
-                self._add_local(folder, "files", (path.rsplit("/", 1)[-1], path))
+                self._add_local(folder, "files", (path[len(files_dir) + 1:], path))
             if failed:
-                messagebox.showwarning(APP_NAME, "Nicht hochgeladen:\n\n" + "\n".join(failed), parent=self)
+                messagebox.showwarning(APP_NAME, "Nicht hochgeladen:\n\n" + "\n".join(failed[:20]), parent=self)
 
-        self.run_job("Lade Dateien hoch", job, done)
+        def failed(err):
+            self.transfer_end()
+            messagebox.showerror(APP_NAME, str(err), parent=self)
+
+        self.transfer_start("⬆ Hochladen")
+        self.run_job("Lade Dateien hoch", job, done, failed)
 
     # ------------------------------------------------------------ TikTok
     def _tt_folder(self):
@@ -1469,6 +1591,7 @@ class App(BaseTk):
                         def progress(done, total, part=part):
                             if total:
                                 self.jobs.put(("status", f"TikTok {prefix}{part}: {done * 100 // total} % …"))
+                                self.transfer_progress(done, total, note=f"{prefix.strip('[]')}{part}")
 
                         path = tiktok.unique_path(out_dir, name)
                         tiktok.download(url, path, progress)
@@ -1497,6 +1620,7 @@ class App(BaseTk):
 
         def done(result):
             saved, links_saved, errors = result
+            self.transfer_end()
             self.tt_btn.state(["!disabled"])
             for path in saved:
                 self._add_local(folder, "files", (path.rsplit("/", 1)[-1], path))
@@ -1509,10 +1633,12 @@ class App(BaseTk):
                 self.tt_links.delete("1.0", "end")
 
         def failed(err):
+            self.transfer_end()
             self.tt_btn.state(["!disabled"])
             self._tt_log(f"✖ {err}")
 
         self.tt_btn.state(["disabled"])
+        self.transfer_start("⬇ TikTok")
         self._tt_log(f"— {len(links)} Link(s) – Ziel: {'Tresor „' + folder + '“' if to_tresor else target_dir}")
         self.run_job("TikTok", job, done, failed)
 
@@ -1749,9 +1875,14 @@ class App(BaseTk):
         log = lambda line: self.jobs.put(("call", lambda: self._yt_log(line)))  # noqa: E731
         self._yt_log(f"— {len(links)} Link(s) – {youtube.FORMATS[fmt][0]} – Ziel: {folder}")
 
-        def progress(idx, total, percent, title):
+        def progress(idx, total, percent, title, eta=None):
             where = f"[{idx}/{total}] " if idx and total else ""
             self.jobs.put(("status", f"YouTube {where}{percent} – {title[:60]}"))
+            try:
+                value = float(percent.strip().rstrip("%"))
+            except ValueError:
+                return
+            self.transfer_progress(percent=value, eta=eta, note=f"Video {idx}/{total}" if idx and total else title[:40])
 
         def job():
             saved_links = []
@@ -1769,6 +1900,7 @@ class App(BaseTk):
             return items, errors, saved_links
 
         def finished(result):
+            self.transfer_end()
             items, errors, saved_links = result
             self.yt_running = None
             self._yt_busy(False)
@@ -1783,11 +1915,13 @@ class App(BaseTk):
                 self.yt_links.delete("1.0", "end")
 
         def failed(err):
+            self.transfer_end()
             self.yt_running = None
             self._yt_busy(False)
             self._yt_log(f"✖ {err}")
             self.set_status("✖ YouTube: " + str(err))
 
+        self.transfer_start("⬇ YouTube")
         self.run_job("YouTube", job, finished, failed, quiet=True)
 
     # ------------------------------------------------- Übersicht (lokal)
@@ -1994,6 +2128,7 @@ class App(BaseTk):
             opener = self._open_selected_note
         else:
             menu.add_command(label="＋  Dateien hochladen …", command=self.choose_files)
+            menu.add_command(label="＋  Ordner hochladen …", command=self.choose_folder_upload)
             open_label, edit_label = "↗  Auf GitHub öffnen", "✎  Umbenennen"
             opener = self._open_selected_file
         if on_item:

@@ -293,11 +293,15 @@ public class Tresor {
     }
 
     String uniqueFilePath(String filename) throws GitHub.GitHubError {
+        return uniqueFilePath(filename, filesDir);
+    }
+
+    String uniqueFilePath(String filename, String dir) throws GitHub.GitHubError {
         String name = safeFilename(filename);
         int dot = name.lastIndexOf('.');
         String base = dot > 0 ? name.substring(0, dot) : name, ext = dot > 0 ? name.substring(dot) : "";
-        String path = filesDir + "/" + name;
-        for (int n = 2; gh.exists(path); n++) path = filesDir + "/" + base + " (" + n + ")" + ext;
+        String path = dir + "/" + name;
+        for (int n = 2; gh.exists(path); n++) path = dir + "/" + base + " (" + n + ")" + ext;
         return path;
     }
 
@@ -332,10 +336,20 @@ public class Tresor {
         return out;
     }
 
+    /** Dateien, auch in Unterordnern (angezeigt als „Ordner/datei“). */
     public List<Entry> listFiles() throws GitHub.GitHubError {
         List<Entry> out = new ArrayList<>();
-        for (String n : list(filesDir, "")) out.add(new Entry(n, filesDir + "/" + n));
+        walkFiles(filesDir, "", 0, out);
+        Collections.sort(out, (a, b) -> a.label.compareToIgnoreCase(b.label));
         return out;
+    }
+
+    void walkFiles(String dir, String prefix, int depth, List<Entry> out) throws GitHub.GitHubError {
+        for (JSONObject e : gh.listDir(dir)) {
+            String n = e.optString("name");
+            if ("file".equals(e.optString("type")) && !n.equals(KEEP_FILE)) out.add(new Entry(prefix + n, dir + "/" + n));
+            else if ("dir".equals(e.optString("type")) && depth < 4) walkFiles(dir + "/" + n, prefix + n + "/", depth + 1, out);
+        }
     }
 
     public boolean isNote(String path) {
@@ -403,7 +417,7 @@ public class Tresor {
         if (newName.equals(oldName)) return path;
         GitHub.FileData f = gh.getFile(path);
         if (f == null) throw new IllegalArgumentException("Die Datei gibt es nicht mehr.");
-        String newPath = uniqueFilePath(newName);
+        String newPath = uniqueFilePath(newName, path.substring(0, path.lastIndexOf('/')));  // im selben Ordner
         gh.putFile(newPath, f.data, msg("Datei umbenannt: " + oldName + " → " + newPath.substring(newPath.lastIndexOf('/') + 1)), null);
         gh.deleteFile(path, msg("Datei umbenannt: " + oldName));
         return newPath;

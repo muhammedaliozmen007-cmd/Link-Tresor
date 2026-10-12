@@ -253,17 +253,24 @@ class Tresor:
         self.gh.put_file(path, body.encode("utf-8"), self._msg(f"Notiz: {title.strip() or 'Notiz'}"))
         return path
 
-    def unique_file_path(self, filename):
+    def unique_file_path(self, filename, directory=None):
         name = safe_filename(filename)
         base, ext = os.path.splitext(name)
-        path = f"{self.files_dir}/{name}"
+        directory = directory or self.files_dir
+        path = f"{directory}/{name}"
         n = 2
         while self.gh.exists(path):
-            path = f"{self.files_dir}/{base} ({n}){ext}"
+            path = f"{directory}/{base} ({n}){ext}"
             n += 1
         return path
 
-    def add_file(self, local_path):
+    def subdir_path(self, subdir):
+        """Unterordner unter dateien/ (z. B. aus einem hochgeladenen Ordner), Teile werden bereinigt."""
+        parts = [safe_filename(p) for p in re.split(r"[\\/]+", subdir or "") if p.strip(" .")]
+        return "/".join([self.files_dir] + parts)
+
+    def add_file(self, local_path, subdir="", progress=None):
+        """Lädt eine Datei hoch (optional in einen Unterordner von dateien/). progress(gesendet, gesamt)."""
         size = os.path.getsize(local_path)
         if size > MAX_FILE_BYTES:
             raise ValueError(
@@ -271,8 +278,9 @@ class Tresor:
             )
         with open(local_path, "rb") as f:
             data = f.read()
-        path = self.unique_file_path(os.path.basename(local_path))
-        self.gh.put_file(path, data, self._msg(f"Datei: {os.path.basename(path)}"))
+        path = self.unique_file_path(os.path.basename(local_path), self.subdir_path(subdir))
+        name = path[len(self.files_dir) + 1:]
+        self.gh.put_file(path, data, self._msg(f"Datei: {name}"), progress=progress)
         return path
 
     def recent_links(self, limit=200):
@@ -294,9 +302,20 @@ class Tresor:
         """Neueste zuerst -> Liste von (anzeige, pfad)."""
         return [(note_label(n), f"{self.notes_dir}/{n}") for n in self._list(self.notes_dir, ".md")]
 
-    def list_files(self):
-        """-> Liste von (name, pfad)."""
-        return [(n, f"{self.files_dir}/{n}") for n in self._list(self.files_dir)]
+    def list_files(self, max_depth=4):
+        """-> Liste von (name, pfad); Dateien in Unterordnern erscheinen als „Ordner/datei“."""
+        out = []
+
+        def walk(directory, prefix, depth):
+            for e in self.gh.list_dir(directory):
+                name = e.get("name", "")
+                if e.get("type") == "file" and name != FOLDER_KEEP_FILE:
+                    out.append((prefix + name, f"{directory}/{name}"))
+                elif e.get("type") == "dir" and depth < max_depth:
+                    walk(f"{directory}/{name}", f"{prefix}{name}/", depth + 1)
+
+        walk(self.files_dir, "", 0)
+        return sorted(out, key=lambda x: x[0].lower())
 
     # --------------------------------------------------------- Löschen
     def delete_link(self, line, title=""):
@@ -364,7 +383,7 @@ class Tresor:
         data, sha = self.gh.get_file(path)
         if data is None:
             raise ValueError("Die Datei gibt es nicht mehr.")
-        new_path = self.unique_file_path(new_name)
+        new_path = self.unique_file_path(new_name, path.rsplit("/", 1)[0])  # im selben (Unter-)Ordner
         self.gh.put_file(new_path, data, self._msg(f"Datei umbenannt: {old_name} → {new_path.rsplit('/', 1)[-1]}"))
         self.gh.delete_file(path, self._msg(f"Datei umbenannt: {old_name}"), sha)
         return new_path

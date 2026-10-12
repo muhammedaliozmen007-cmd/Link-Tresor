@@ -265,7 +265,8 @@ class Download:
             # MP3 mit eigenem Namen, sonst würde yt-dlp ein gleichnamiges Video als Quelle nehmen und löschen
             "%(uploader|Unbekannt)s/%(title).120B [%(id)s]" + (" (Audio)" if self.fmt == "mp3" else "") + ".%(ext)s",
             "--progress-template",
-            f"download:{PROGRESS}|%(info.playlist_index|)s|%(info.n_entries|)s|%(progress._percent_str)s|%(info.title)s",
+            f"download:{PROGRESS}|%(info.playlist_index|)s|%(info.n_entries|)s|%(progress._percent_str)s"
+            "|%(progress.eta|)s|%(info.title)s",
             "--print",
             f"after_move:{DONE}|%(webpage_url)s|%(uploader|)s|%(title)s|%(filepath)s",
         ]
@@ -287,8 +288,12 @@ class Download:
         for raw in self.proc.stdout:
             line = raw.decode("utf-8", "replace").rstrip()
             if line.startswith(PROGRESS + "|"):
-                _, idx, total, percent, title = (line.split("|", 4) + [""] * 5)[:5]
-                on_progress(idx, total, percent.strip(), title)
+                _, idx, total, percent, eta, title = (line.split("|", 5) + [""] * 6)[:6]
+                try:
+                    eta = int(float(eta))
+                except ValueError:
+                    eta = None
+                on_progress(idx, total, percent.strip(), title, eta)
             elif line.startswith(DONE + "|"):
                 _, url, uploader, title, path = (line.split("|", 4) + [""] * 5)[:5]
                 item = {"url": url, "uploader": uploader, "title": title, "path": path}

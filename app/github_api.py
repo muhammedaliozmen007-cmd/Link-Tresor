@@ -26,10 +26,13 @@ class GitHubClient:
         self.branch = branch.strip()
 
     # ------------------------------------------------------------------ intern
-    def _request(self, method, path, body=None):
+    def _request(self, method, path, body=None, progress=None):
         url = API + path
         data = json.dumps(body).encode("utf-8") if body is not None else None
-        req = urllib.request.Request(url, data=data, method=method)
+        payload = _ProgressBody(data, progress) if data is not None and progress else data
+        req = urllib.request.Request(url, data=payload, method=method)
+        if payload is not data:
+            req.add_header("Content-Length", str(len(data)))
         req.add_header("Accept", "application/vnd.github+json")
         req.add_header("X-GitHub-Api-Version", "2022-11-28")
         req.add_header("User-Agent", "Link-Tresor")
@@ -91,7 +94,8 @@ class GitHubClient:
         info = self._request("GET", self._contents_path(path) + self._ref_query())
         return bool(info) and not isinstance(info, list)
 
-    def put_file(self, path, data, message, sha=None):
+    def put_file(self, path, data, message, sha=None, progress=None):
+        """progress(gesendet, gesamt) – Bytes der Anfrage (Inhalt ist base64, also ~4/3 der Datei)."""
         body = {
             "message": message,
             "content": base64.b64encode(data).decode("ascii"),
@@ -100,7 +104,7 @@ class GitHubClient:
             body["sha"] = sha
         if self.branch:
             body["branch"] = self.branch
-        result = self._request("PUT", self._contents_path(path), body)
+        result = self._request("PUT", self._contents_path(path), body, progress)
         return result.get("content", {}).get("html_url", "")
 
     def list_dir(self, path):
@@ -259,3 +263,19 @@ class _StripAuthOnRedirect(urllib.request.HTTPRedirectHandler):
             new.unredirected_hdrs.pop("Authorization", None)
             new.headers["Accept"] = "*/*"
         return new
+
+
+class _ProgressBody:
+    """Anfrage-Inhalt, der beim Senden meldet, wie viel schon raus ist (für die Upload-Leiste)."""
+
+    def __init__(self, data, progress):
+        self.data, self.progress, self.pos = data, progress, 0
+
+    def read(self, size=-1):
+        if size is None or size < 0:
+            size = len(self.data) - self.pos
+        chunk = self.data[self.pos:self.pos + min(size, 64 * 1024)]
+        self.pos += len(chunk)
+        if chunk:
+            self.progress(self.pos, len(self.data))
+        return chunk
