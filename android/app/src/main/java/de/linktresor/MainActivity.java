@@ -71,6 +71,9 @@ public class MainActivity extends Activity {
     static final int TEXT = 0xFFE6E6E6, MUTED = 0xFF9AA0A6, ACCENT = 0xFF3B82F6, DANGER = 0xFFE5534B;
 
     static final int PICK_FILES = 1, ASK_STORAGE = 2;
+    // YouTube-Qualität: Anzeige + max. Höhe (0 = beste, -1 = nur Ton)
+    static final String[] YT_QUALITIES = {"🎬 Beste Qualität", "🎬 1080p", "🎬 720p", "🎬 480p", "🎵 Nur Ton (M4A)"};
+    static final int[] YT_HEIGHTS = {0, 1080, 720, 480, -1};
 
     final ExecutorService worker = Executors.newSingleThreadExecutor();
     final Handler ui = new Handler(Looper.getMainLooper());
@@ -95,9 +98,9 @@ public class MainActivity extends Activity {
     Button bellButton;
     ArrayAdapter<String> folderAdapter;
     boolean folderBoxUpdating;
-    static final int TAB_LINK = 0, TAB_NOTE = 1, TAB_FILE = 2, TAB_TIKTOK = 3, TAB_OVERVIEW = 4;
-    final Button[] tabButtons = new Button[5];
-    final View[] tabViews = new View[5];
+    static final int TAB_LINK = 0, TAB_NOTE = 1, TAB_FILE = 2, TAB_TIKTOK = 3, TAB_YOUTUBE = 4, TAB_OVERVIEW = 5;
+    final Button[] tabButtons = new Button[6];
+    final View[] tabViews = new View[6];
     int currentTab = 0;
     TextView status;
     EditText linkUrl, linkTitle, linkNote, noteTitle, noteText;
@@ -105,7 +108,12 @@ public class MainActivity extends Activity {
     EditText ttLinks;
     RadioButton ttToPhone, ttToTresor, ttAsVideo, ttAsMp3;
     android.widget.CheckBox ttKeepLink;
-    Button ttButton;
+    Button ttButton, ytButton;
+    EditText ytLinks;
+    TextView ytLog;
+    Spinner ytQuality;
+    RadioButton ytToPhone, ytToTresor;
+    android.widget.CheckBox ytKeepLink;
     ListView overview;
     final List<Object> overviewItems = new ArrayList<>();  // angezeigt (gefiltert)
     final List<Object> overviewAll = new ArrayList<>();    // alles im Ordner
@@ -320,17 +328,20 @@ public class MainActivity extends Activity {
 
         // --- Tabs
         LinearLayout tabs = row();
-        String[] names = {"🔗\nLink", "📝\nNotiz", "📎\nDatei", "🎵\nTikTok", "📋\nÜbersicht"};
+        String[] names = {"🔗\nLink", "📝\nNotiz", "📎\nDatei", "🎵\nTikTok", "▶\nYouTube", "📋\nÜbersicht"};
         for (int i = 0; i < names.length; i++) {
             final int idx = i;
             Button b = button(names[i], CARD, v -> selectTab(idx));
-            b.setTextSize(12);
+            b.setTextSize(11);
             b.setLineSpacing(0, 0.9f);
-            b.setPadding(dp(2), dp(4), dp(2), dp(4));
+            b.setPadding(dp(1), dp(4), dp(1), dp(4));
+            b.setSingleLine(false);
+            if (Build.VERSION.SDK_INT >= 26)  // 6 Tabs: Schrift notfalls verkleinern statt abschneiden
+                b.setAutoSizeTextTypeUniformWithConfiguration(8, 11, 1, TypedValue.COMPLEX_UNIT_SP);
             b.setMinHeight(dp(54));
             b.setMinimumHeight(dp(54));
             LinearLayout.LayoutParams p = weight(1);
-            p.setMargins(i == 0 ? 0 : dp(4), 0, 0, 0);
+            p.setMargins(i == 0 ? 0 : dp(3), 0, 0, 0);
             tabs.addView(b, p);
             tabButtons[i] = b;
         }
@@ -342,7 +353,8 @@ public class MainActivity extends Activity {
         tabViews[1] = buildNoteTab();
         tabViews[2] = buildFileTab();
         tabViews[3] = buildTikTokTab();
-        tabViews[4] = buildOverviewTab();
+        tabViews[4] = buildYouTubeTab();
+        tabViews[5] = buildOverviewTab();
         for (View v : tabViews) content.addView(v);
         root.addView(content, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
 
@@ -496,6 +508,88 @@ public class MainActivity extends Activity {
         ttLog.setTextIsSelectable(true);
         ttLog.setPadding(0, dp(12), 0, 0);
         l.addView(ttLog);
+        return card(l);
+    }
+
+    View buildYouTubeTab() {
+        LinearLayout l = column();
+        l.addView(label("YouTube-Links (einer pro Zeile – auch Shorts):"));
+        ytLinks = field("https://youtu.be/…", true);
+        ytLinks.setMinLines(3);
+        ytLinks.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_VARIATION_URI);
+        l.addView(ytLinks);
+
+        l.addView(label("Qualität:"));
+        ytQuality = new Spinner(this, Spinner.MODE_DROPDOWN);
+        ytQuality.setBackground(box(FIELD, LINE));
+        ytQuality.setPopupBackgroundDrawable(box(CARD, LINE));
+        ytQuality.setAdapter(new ArrayAdapter<String>(this, android.R.layout.simple_spinner_item, YT_QUALITIES) {
+            @Override
+            public View getView(int pos, View convert, ViewGroup parent) {
+                return styleRow(super.getView(pos, convert, parent), false);
+            }
+
+            @Override
+            public View getDropDownView(int pos, View convert, ViewGroup parent) {
+                return styleRow(super.getDropDownView(pos, convert, parent), true);
+            }
+        });
+        ytQuality.setSelection(Math.min(prefs.getInt("youtube_quality", 1), YT_QUALITIES.length - 1));
+        ytQuality.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                prefs.edit().putInt("youtube_quality", pos).apply();
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> p) {
+            }
+        });
+        l.addView(ytQuality);
+        TextView hint = label("„Nur Ton“ wird am Handy als M4A gespeichert (spielt jeder Player ab) – "
+                + "MP3 geht nur am PC, weil Android dafür kein FFmpeg hat.");
+        hint.setTextColor(MUTED);
+        hint.setTextSize(12);
+        l.addView(hint);
+
+        l.addView(label("Speichern:"));
+        RadioGroup where = new RadioGroup(this);
+        ytToPhone = new RadioButton(this);
+        ytToTresor = new RadioButton(this);
+        ytToPhone.setText("📱 Aufs Handy (Download/YouTube)");
+        ytToTresor.setText("🔒 In den Tresor (aktueller Ordner, max. 70 MB)");
+        for (RadioButton r : new RadioButton[]{ytToPhone, ytToTresor}) {
+            r.setTextColor(TEXT);
+            r.setTextSize(15);
+            r.setId(View.generateViewId());
+            where.addView(r);
+        }
+        (prefs.getString("youtube_target", "phone").equals("tresor") ? ytToTresor : ytToPhone).setChecked(true);
+        where.setOnCheckedChangeListener((g, id) ->
+                prefs.edit().putString("youtube_target", ytToTresor.isChecked() ? "tresor" : "phone").apply());
+        l.addView(where);
+        ytKeepLink = new android.widget.CheckBox(this);
+        ytKeepLink.setText("Link zusätzlich im Tresor merken");
+        ytKeepLink.setTextColor(TEXT);
+        ytKeepLink.setTextSize(15);
+        ytKeepLink.setChecked(prefs.getBoolean("youtube_link", false));
+        ytKeepLink.setOnCheckedChangeListener((b, on) -> prefs.edit().putBoolean("youtube_link", on).apply());
+        l.addView(ytKeepLink);
+
+        LinearLayout r = row();
+        r.addView(button("📋 Einfügen", CARD, v -> pasteYouTube()), weight(1));
+        ytButton = button("⬇ Herunterladen", ACCENT, v -> downloadYouTube());
+        LinearLayout.LayoutParams p = weight(1.4f);
+        p.setMargins(dp(8), 0, 0, 0);
+        r.addView(ytButton, p);
+        l.addView(r, margins(0, 12, 0, 0));
+
+        ytLog = new TextView(this);
+        ytLog.setTextColor(TEXT);
+        ytLog.setTextSize(13);
+        ytLog.setTextIsSelectable(true);
+        ytLog.setPadding(0, dp(12), 0, 0);
+        l.addView(ytLog);
         return card(l);
     }
 
@@ -883,6 +977,10 @@ public class MainActivity extends Activity {
                 List<Uri> l = new ArrayList<>();
                 l.add(stream);
                 confirmUpload(l);
+            } else if (text != null && !YouTube.findIds(text).isEmpty()) {
+                selectTab(TAB_YOUTUBE);
+                addYouTubeLinks(text);
+                setStatus("YouTube-Link übernommen – „⬇ Herunterladen“ tippen.");
             } else if (text != null && !TikTok.findLinks(text).isEmpty() && TikTok.LINK_RE.matcher(text).find()) {
                 selectTab(TAB_TIKTOK);
                 addTikTokLinks(text);
@@ -958,10 +1056,18 @@ public class MainActivity extends Activity {
         ttLog.append(line + "\n");
     }
 
+    interface Writer {
+        void write(java.io.OutputStream out) throws Exception;
+    }
+
     /** Speichert eine Datei in Download/TikTok/<user> (öffentlicher Download-Ordner). */
     String saveToDownloads(String user, String name, String mime, TikTok.Info info, String url, TikTok.Progress pr)
             throws Exception {
-        String sub = "TikTok/" + TikTok.safeName(user);
+        return saveToDownloads("TikTok/" + TikTok.safeName(user), name, mime, out -> TikTok.download(url, out, pr));
+    }
+
+    /** Speichert eine Datei in Download/<sub> (öffentlicher Download-Ordner). */
+    String saveToDownloads(String sub, String name, String mime, Writer writer) throws Exception {
         if (Build.VERSION.SDK_INT >= 29) {
             android.content.ContentValues v = new android.content.ContentValues();
             v.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name);
@@ -973,7 +1079,7 @@ public class MainActivity extends Activity {
             Uri uri = cr.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
             if (uri == null) throw new Exception("Download-Ordner nicht beschreibbar.");
             try (java.io.OutputStream out = cr.openOutputStream(uri)) {
-                TikTok.download(url, out, pr);
+                writer.write(out);
             } catch (Exception e) {
                 cr.delete(uri, null, null);
                 throw e;
@@ -992,7 +1098,7 @@ public class MainActivity extends Activity {
             f = new File(dir, name.substring(0, dot) + " (" + n + ")" + name.substring(dot));
         }
         try (FileOutputStream out = new FileOutputStream(f)) {
-            TikTok.download(url, out, pr);
+            writer.write(out);
         } catch (Exception e) {
             f.delete();
             throw e;
@@ -1083,12 +1189,159 @@ public class MainActivity extends Activity {
         });
     }
 
+    // =============================================================== YouTube
+    void addYouTubeLinks(String text) {
+        StringBuilder b = new StringBuilder(ytLinks.getText().toString().trim());
+        for (String id : YouTube.findIds(text)) {
+            String link = "https://youtu.be/" + id;
+            if (b.indexOf(id) >= 0) continue;
+            if (b.length() > 0) b.append('\n');
+            b.append(link);
+        }
+        ytLinks.setText(b.toString());
+    }
+
+    void pasteYouTube() {
+        ClipData clip = ((ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE)).getPrimaryClip();
+        CharSequence text = clip == null || clip.getItemCount() == 0 ? null : clip.getItemAt(0).coerceToText(this);
+        if (text == null || YouTube.findIds(text.toString()).isEmpty()) {
+            setStatus("Kein YouTube-Link in der Zwischenablage.");
+            return;
+        }
+        addYouTubeLinks(text.toString());
+    }
+
+    void ytLog(String line) {
+        ytLog.append(line + "\n");
+    }
+
+    static String mb(long bytes) {
+        return String.format(Locale.GERMAN, "%.1f MB", bytes / 1048576.0);
+    }
+
+    void downloadYouTube() {
+        String text = ytLinks.getText().toString();
+        List<String> ids = YouTube.findIds(text);
+        if (ids.isEmpty()) {
+            ytLinks.setError(YouTube.hasListOnly(text)
+                    ? "Playlists und Kanäle gehen nur am PC – bitte einzelne Video-Links einfügen."
+                    : "Bitte mindestens einen YouTube-Link einfügen.");
+            return;
+        }
+        boolean toTresor = ytToTresor.isChecked(), keepLink = ytKeepLink.isChecked();
+        int height = YT_HEIGHTS[Math.max(0, ytQuality.getSelectedItemPosition())];
+        boolean audioOnly = height < 0;
+        if ((toTresor || keepLink) && needToken()) return;
+        if (!toTresor && Build.VERSION.SDK_INT < 29
+                && checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{android.Manifest.permission.WRITE_EXTERNAL_STORAGE}, ASK_STORAGE);
+            return;
+        }
+        hideKeyboard();
+        Tresor t = tresor();
+        String f = folder;
+        File work = new File(getCacheDir(), "youtube");
+        ytButton.setEnabled(false);
+        ytLog("— " + ids.size() + " Video(s) – Ziel: " + (toTresor ? "Tresor „" + f + "“" : "Download/YouTube"));
+        runJob("YouTube", () -> {
+            int ok = 0;
+            for (int i = 0; i < ids.size(); i++) {
+                String prefix = "[" + (i + 1) + "/" + ids.size() + "]", id = ids.get(i);
+                File[] tmp = new File[3];
+                try {
+                    ui.post(() -> setStatus("YouTube " + prefix + ": hole Infos …"));
+                    YouTube.Info info = YouTube.fetchInfo(id);
+                    YouTube.Plan plan = YouTube.choose(info, Math.max(height, 0), audioOnly);
+                    if (toTresor && plan.size() > Tresor.MAX_FILE_BYTES)
+                        throw new Exception("zu groß für den Tresor (" + mb(plan.size()) + ", max. 70 MB) – "
+                                + "kleinere Qualität oder „Aufs Handy“ wählen");
+                    work.mkdirs();
+                    String name = info.baseName() + "." + plan.ext;
+                    String q = audioOnly ? "Ton" : (plan.muxed != null ? plan.muxed : plan.video).quality;
+                    // Einzelteile laden (Fortschritt über alle Teile)
+                    YouTube.Stream[] parts = plan.muxed != null ? new YouTube.Stream[]{plan.muxed}
+                            : audioOnly ? new YouTube.Stream[]{plan.audio} : new YouTube.Stream[]{plan.video, plan.audio};
+                    long all = Math.max(plan.size(), 1);
+                    long[] before = {0};
+                    for (int n = 0; n < parts.length; n++) {
+                        tmp[n] = new File(work, id + "_" + n + ".part");
+                        String what = parts.length > 1 ? (n == 0 ? " Video" : " Ton") : "";
+                        try (FileOutputStream o = new FileOutputStream(tmp[n])) {
+                            YouTube.download(parts[n], o, (done, total) -> {
+                                long pct = Math.min(100, (before[0] + done) * 100 / all);
+                                ui.post(() -> setStatus("YouTube " + prefix + what + ": " + pct + " % von " + mb(all) + " …"));
+                            });
+                        }
+                        before[0] += tmp[n].length();
+                    }
+                    File result;
+                    if (plan.muxed != null) result = tmp[0];
+                    else {
+                        ui.post(() -> setStatus("YouTube " + prefix + ": füge zusammen …"));
+                        result = tmp[2] = new File(work, id + "." + plan.ext);
+                        if (audioOnly) Muxer.merge(result, tmp[0]);
+                        else Muxer.merge(result, tmp[0], tmp[1]);
+                    }
+                    String mime = audioOnly ? "audio/mp4" : "video/mp4";
+                    if (toTresor) {
+                        if (result.length() > Tresor.MAX_FILE_BYTES)
+                            throw new Exception("zu groß für den Tresor (" + mb(result.length()) + ", max. 70 MB)");
+                        ui.post(() -> setStatus("YouTube " + prefix + ": lade in den Tresor …"));
+                        byte[] data = new byte[(int) result.length()];
+                        try (java.io.FileInputStream in = new java.io.FileInputStream(result)) {
+                            int off = 0, n;
+                            while (off < data.length && (n = in.read(data, off, data.length - off)) > 0) off += n;
+                        }
+                        t.addFile(name, data);
+                    } else {
+                        File src = result;
+                        saveToDownloads("YouTube", name, mime, out -> {
+                            try (java.io.FileInputStream in = new java.io.FileInputStream(src)) {
+                                byte[] buf = new byte[256 * 1024];
+                                int n;
+                                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                            }
+                        });
+                    }
+                    long size = result.length();
+                    String title = info.title.length() > 60 ? info.title.substring(0, 60) : info.title;
+                    ui.post(() -> ytLog(prefix + " ✔ " + (title.isEmpty() ? id : title) + " (" + q + ", " + mb(size) + ")"));
+                    if (keepLink) {
+                        String lt = ("YouTube: " + (info.title.length() > 80 ? info.title.substring(0, 80) : info.title))
+                                .replaceAll("[: ]+$", "");
+                        t.addLink(info.link(), lt, info.author);
+                    }
+                    ok++;
+                } catch (Exception e) {
+                    ui.post(() -> ytLog(prefix + " ✖ youtu.be/" + id + ": " + e.getMessage()));
+                } finally {
+                    for (File x : tmp) if (x != null) x.delete();
+                }
+            }
+            return ok;
+        }, ok -> {
+            ytButton.setEnabled(true);
+            String where = toTresor ? "im Tresor-Ordner „" + f + "“" : "in Download/YouTube";
+            setStatus(ok > 0 ? "✔ YouTube: " + ok + " von " + ids.size() + " gespeichert " + where + "."
+                    : "✖ YouTube: nichts gespeichert.");
+            if (ok > 0) ytLinks.setText("");
+        }, err -> {
+            ytButton.setEnabled(true);
+            ytLog("✖ " + err.getMessage());
+        });
+    }
+
     @Override
     public void onRequestPermissionsResult(int request, String[] perms, int[] results) {
         super.onRequestPermissionsResult(request, perms, results);
         if (request != ASK_STORAGE) return;
-        if (results.length > 0 && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) downloadTikTok();
-        else alert("TikTok", "Ohne Speicher-Erlaubnis kann das Video nicht aufs Handy. Alternativ „In den Tresor“ wählen.");
+        boolean yt = currentTab == TAB_YOUTUBE;
+        if (results.length > 0 && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            if (yt) downloadYouTube();
+            else downloadTikTok();
+        } else
+            alert(yt ? "YouTube" : "TikTok", "Ohne Speicher-Erlaubnis kann das Video nicht aufs Handy. Alternativ „In den Tresor“ wählen.");
     }
 
     // ============================================================= Übersicht
@@ -1481,7 +1734,7 @@ public class MainActivity extends Activity {
     List<String[]> mergeFresh(List<String[]> items) {
         long now = System.currentTimeMillis();
         freshRung.values().removeIf(t -> t < now);
-        freshFeedback.values().removeIf(v -> Long.parseLong(v[2]) < now);
+        freshFeedback.values().removeIf(v -> Long.parseLong(v[1]) < now);
         List<String[]> out = new ArrayList<>();
         java.util.Set<String> known = new java.util.HashSet<>();
         for (String[] it : items) {

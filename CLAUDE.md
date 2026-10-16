@@ -37,7 +37,7 @@ app/youtube.py        YouTube-Download (Idee aus Tyrrrz/YoutubeDownloader) über
                       Mal yt-dlp.exe, Deno (JS-Laufzeit, braucht yt-dlp für YouTube) und FFmpeg (gpl-shared,
                       bin/ inkl. DLLs) nach %APPDATA%\Link-Tresor\tools (~150 MB), `yt-dlp -U` max. 1×/Tag;
                       Tab „▶ YouTube“ (Video/1080p/720p/MP3, Untertitel, Playlists/Kanäle mit Rückfrage).
-                      Nur PC – auf Android gibt es kein yt-dlp. Aus der Cloud blockt YouTube (403) →
+                      Am PC; Android hat eigenes YouTube.java (siehe unten). Aus der Cloud blockt YouTube (403) →
                       dort nur mit lokalem Testvideo + `pip install yt-dlp` testen (LT_YTDLP/PATH)
 app/converter.py      MP3-Konverter (Tab „🎧 MP3“): Videos/Audio per FFmpeg in reine MP3 (nur 1. Tonspur,
                       Metadaten bleiben); FFmpeg teilt er sich mit youtube.py (install_tools(only=["FFmpeg"])).
@@ -51,6 +51,11 @@ android/              Handy-App (Java, nur Android-Framework, kein AndroidX): Gi
                       = Nachbau von github_api.py/tresor.py (gleiches Ablageformat!), MainActivity.java
                       = Oberfläche (Ordner, Tabs, „Teilen“-Ziel, Feedback, Klingel, Update),
                       TikTok.java = Gegenstück zu tiktok.py (Ziel Download/TikTok oder Tresor),
+                      YouTube.java = YouTube am Handy ohne yt-dlp: InnerTube-API mit Client „ANDROID_VR“
+                      (direkte URLs, keine JS-Entschlüsselung), lädt in 10-MB-Stücken (&range=), H.264+AAC
+                      werden mit Muxer.java (MediaMuxer) zusammengefügt, „Nur Ton“ = M4A (kein MP3-Encoder);
+                      keine Playlists. Aus der Cloud kommt „Sign in to confirm you're not a bot“ → nur mit
+                      Fake-Server testbar (YouTube.API umbiegen),
                       FilesProvider.java = Dateien/APK an andere Apps freigeben, app/link-tresor.jks =
                       fester Signierschlüssel (nicht ändern, sonst lassen sich Updates nicht installieren)
 ```
