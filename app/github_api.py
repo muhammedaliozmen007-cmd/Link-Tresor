@@ -128,16 +128,12 @@ class GitHubClient:
             body["branch"] = self.branch
         self._request("DELETE", self._contents_path(path), body)
 
-    def _rewrite_dir(self, directory, message, new_path):
-        """Ändert alle Dateien unter directory in einem einzigen Commit.
-
-        new_path(alter_pfad) gibt den neuen Pfad zurück oder None zum Löschen.
-        """
+    def _tree(self):
+        """-> (head_sha, tree) des Branches; tree["tree"] = alle Einträge (rekursiv)."""
         if not self.branch:
             raise GitHubError("Kein Branch eingestellt.")
         repo = f"/repos/{self.repo}/git"
-        branch = urllib.parse.quote(self.branch)
-        ref = self._request("GET", f"{repo}/ref/heads/{branch}")
+        ref = self._request("GET", f"{repo}/ref/heads/{urllib.parse.quote(self.branch)}")
         if not ref:
             raise GitHubError(f"Branch „{self.branch}“ nicht gefunden.")
         head = ref["object"]["sha"]
@@ -145,7 +141,22 @@ class GitHubClient:
         tree = self._request("GET", f"{repo}/trees/{commit['tree']['sha']}?recursive=1")
         if tree.get("truncated"):
             raise GitHubError("Repository zu groß für diese Aktion.")
+        return head, tree
 
+    def _commit(self, head, base_tree, changes, message):
+        repo = f"/repos/{self.repo}/git"
+        new_tree = self._request("POST", f"{repo}/trees", {"base_tree": base_tree, "tree": changes})
+        new_commit = self._request(
+            "POST", f"{repo}/commits", {"message": message, "tree": new_tree["sha"], "parents": [head]}
+        )
+        self._request("PATCH", f"{repo}/refs/heads/{urllib.parse.quote(self.branch)}", {"sha": new_commit["sha"]})
+
+    def _rewrite_dir(self, directory, message, new_path):
+        """Ändert alle Dateien unter directory in einem einzigen Commit.
+
+        new_path(alter_pfad) gibt den neuen Pfad zurück oder None zum Löschen.
+        """
+        head, tree = self._tree()
         prefix = directory.rstrip("/") + "/"
         changes = []
         for e in tree["tree"]:
@@ -156,12 +167,48 @@ class GitHubClient:
                 changes.append({"path": e["path"], "mode": e["mode"], "type": "blob", "sha": None})
         if not changes:
             raise GitHubError("Der Ordner ist leer oder existiert nicht.")
+        self._commit(head, tree["sha"], changes, message)
 
-        new_tree = self._request("POST", f"{repo}/trees", {"base_tree": tree["sha"], "tree": changes})
-        new_commit = self._request(
-            "POST", f"{repo}/commits", {"message": message, "tree": new_tree["sha"], "parents": [head]}
-        )
-        self._request("PATCH", f"{repo}/refs/heads/{branch}", {"sha": new_commit["sha"]})
+    def list_tree(self, path):
+        """Alle Dateien unter path (oder path selbst, falls Datei) -> Liste von (pfad, größe)."""
+        _, tree = self._tree()
+        path = path.rstrip("/")
+        return [
+            (e["path"], e.get("size", 0))
+            for e in tree["tree"]
+            if e["type"] == "blob" and (e["path"] == path or e["path"].startswith(path + "/"))
+        ]
+
+    def transfer(self, src, dest_dir, message, move=False):
+        """Kopiert/verschiebt eine Datei oder einen Ordner nach dest_dir – ein Commit, ohne neu hochzuladen.
+
+        Gibt es den Namen im Ziel schon, wird „ (2)“ angehängt. -> neuer Pfad
+        """
+        head, tree = self._tree()
+        src, dest_dir = src.rstrip("/"), dest_dir.rstrip("/")
+        if dest_dir == src or dest_dir.startswith(src + "/"):
+            raise GitHubError("Ein Ordner kann nicht in sich selbst eingefügt werden.")
+        blobs = [e for e in tree["tree"] if e["type"] == "blob"]
+        is_file = any(e["path"] == src for e in blobs)
+        items = [e for e in blobs if e["path"] == src or e["path"].startswith(src + "/")]
+        if not items:
+            raise GitHubError("Die Quelle gibt es nicht mehr.")
+        taken = {e["path"] for e in tree["tree"]}
+        name = src.rsplit("/", 1)[-1]
+        base, ext = (name.rsplit(".", 1)[0], "." + name.rsplit(".", 1)[1]) if is_file and "." in name[1:] else (name, "")
+        target, n = f"{dest_dir}/{name}", 2
+        while target in taken:
+            target = f"{dest_dir}/{base} ({n}){ext}"
+            n += 1
+        if move and src.rsplit("/", 1)[0] == dest_dir:
+            return src  # schon dort
+        changes = []
+        for e in items:
+            changes.append({"path": target + e["path"][len(src):], "mode": e["mode"], "type": "blob", "sha": e["sha"]})
+            if move:
+                changes.append({"path": e["path"], "mode": e["mode"], "type": "blob", "sha": None})
+        self._commit(head, tree["sha"], changes, message)
+        return target
 
     def move_dir(self, old_dir, new_dir, message):
         """Verschiebt alle Dateien von old_dir nach new_dir – in einem einzigen Commit."""

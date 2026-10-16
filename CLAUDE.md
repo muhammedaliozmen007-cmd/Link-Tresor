@@ -26,7 +26,9 @@ app/link_tresor.pyw   Oberfläche (Dark Mode, Ordner-Leiste, Tabs Übersicht/Tik
                       umsortierbar, Reihenfolge in cfg["tab_order"]; Links/Notizen/Dateien per Rechtsklick
                       in der Übersicht anlegen/hochladen/bearbeiten/entfernen, Dateien auch per Drag & Drop,
                       Suche, Feedback-Dialog, „🔔 Claude rufen“, Update-Button, Zahnrad = Einstellungen)
-app/tresor.py         Ablage-Logik: Ordner, Links (links.md), Notizen, Dateien, Bearbeiten, Löschen
+app/tresor.py         Ablage-Logik: Ordner, Links (links.md), Notizen, Dateien, Bearbeiten, Löschen,
+                      Ausschneiden/Kopieren/Einfügen (gh.transfer: ein Commit, Blobs werden nur umgehängt),
+                      Herunterladen von Datei/Ordner bzw. als ZIP (download)
 app/github_api.py     Mini-GitHub-Client (Contents API, Git-Data-API für Ordner verschieben/löschen,
                       Issues, Feedback-Kanal, Releases + Asset-Download aus privatem Repo)
 app/tiktok.py         TikTok-Download (Idee aus Tikorgzo): Infos/Links über die TikWM-API

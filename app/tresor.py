@@ -12,6 +12,8 @@ Ablage im Repository (Ordner „Allgemein“ = direkt in tresor/):
 import os
 import re
 import time
+import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from github_api import GitHubError
@@ -410,6 +412,63 @@ class Tresor:
             f"{self.files_dir}/{rel}", f"{self.files_dir}/{new_rel}", self._msg(f"Ordner umbenannt: {rel} → {new_rel}")
         )
         return new_rel
+
+    def paste(self, src, dest_rel="", move=False):
+        """Kopiert/verschiebt Datei oder Ordner (auch aus einem anderen Tresor-Ordner) nach dateien/<dest_rel>.
+
+        -> neuer Pfad
+        """
+        dest = self.subdir_path(dest_rel)
+        name = src.rstrip("/").rsplit("/", 1)[-1]
+        verb = "verschoben" if move else "kopiert"
+        where = dest[len(self.files_dir):].strip("/") or "dateien"
+        return self.gh.transfer(src, dest, self._msg(f"{name} {verb} nach {where}"), move=move)
+
+    def files_under(self, path):
+        """Alle Dateien einer Datei/eines Ordners -> Liste von (relativer name inkl. Ordnername, pfad, größe)."""
+        path = path.rstrip("/")
+        top = path.rsplit("/", 1)[0] + "/" if "/" in path else ""
+        return [
+            (p[len(top):], p, size)
+            for p, size in self.gh.list_tree(path)
+            if p.rsplit("/", 1)[-1] != FOLDER_KEEP_FILE
+        ]
+
+    def download(self, path, target, as_zip=False, progress=None):
+        """Lädt Datei/Ordner auf den PC: nach target (Ordner) oder als ZIP-Datei target. progress(i, n, name)."""
+        items = self.files_under(path)
+        if not items:
+            raise ValueError("Da ist nichts zum Herunterladen.")
+
+        def fetch(item):
+            data, _ = self.gh.get_file(item[1])
+            if data is None:
+                raise ValueError(f"„{item[0]}“ gibt es nicht mehr.")
+            return item[0], data
+
+        zf = zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) if as_zip else None
+        try:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                for i, (rel, data) in enumerate(pool.map(fetch, items), 1):
+                    if progress:
+                        progress(i, len(items), rel)
+                    if zf:
+                        zf.writestr(rel, data)
+                    else:
+                        dest = os.path.join(target, *rel.split("/"))
+                        os.makedirs(os.path.dirname(dest), exist_ok=True)
+                        with open(dest, "wb") as f:
+                            f.write(data)
+        except Exception:
+            if zf:
+                zf.close()
+                zf = None
+                os.remove(target)
+            raise
+        finally:
+            if zf:
+                zf.close()
+        return len(items)
 
     def delete_entry(self, path):
         """Löscht eine Notiz oder Datei."""

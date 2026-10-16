@@ -973,6 +973,7 @@ class App(BaseTk):
         self._link_urls, self._note_paths, self._file_paths = [], [], []
         self._file_rows = []  # angezeigte Zeilen der Dateien-Box: ⬆ zurück / 📁 Ordner / Datei
         self.files_cwd = ""  # gerade geöffneter Unterordner von dateien/
+        self.clip = None  # ausgeschnittene/kopierte Datei oder Ordner (zum Einfügen, auch in anderen Ordnern)
         self.links_list.bind("<Double-Button-1>", self._only_on_item(self._open_selected_link))
         self.notes_list.bind("<Double-Button-1>", self._only_on_item(self._open_selected_note))
         self.files_list.bind("<Double-Button-1>", self._only_on_item(self._open_selected_file))
@@ -2179,6 +2180,85 @@ class App(BaseTk):
 
         self.run_job("Benenne Ordner um", lambda: tresor.rename_files_dir(rel, dlg.result), done)
 
+    # ------------------------------------- Ausschneiden / Kopieren / Einfügen
+    def _files_path(self, rel):
+        """Voller Repo-Pfad zu einem Unterordner von dateien/ im aktuellen Tresor-Ordner."""
+        base = self.tresor().files_dir
+        return f"{base}/{rel}" if rel else base
+
+    def _set_clip(self, path, name, is_dir, move):
+        self.clip = {"path": path, "name": name, "dir": is_dir, "move": move, "folder": self.folder}
+        verb = "ausgeschnitten" if move else "kopiert"
+        self.set_status(f"{'✂' if move else '⧉'} „{name}“ {verb} – im Ziel (auch anderer Ordner) Rechtsklick → Einfügen")
+
+    def _paste(self, dest_rel):
+        clip, tresor, folder = self.clip, self.tresor(), self.folder
+        if not clip:
+            return
+        verb = "Verschiebe" if clip["move"] else "Kopiere"
+
+        def done(_new_path):
+            if clip["move"]:
+                self.clip = None
+                # Quelle sofort ausblenden (auch wenn sie in einem anderen Tresor-Ordner liegt)
+                src = clip["path"]
+                data = self.cache.get(clip["folder"])
+                if data:
+                    gone = [x for x in data["files"] if x[1] == src or x[1].startswith(src + "/")]
+                    for x in gone:
+                        self.hidden[self._key("files", x)] = time.time() + self.KEEP_SECONDS
+                    data["files"] = [x for x in data["files"] if x not in gone]
+            where = f"„{dest_rel}“" if dest_rel else f"„{folder}“"
+            self.set_status(f"✔ „{clip['name']}“ {'verschoben' if clip['move'] else 'kopiert'} nach {where}")
+            self.refresh_overview(quiet=True)
+
+        self.run_job(f"{verb} „{clip['name']}“", lambda: tresor.paste(clip["path"], dest_rel, clip["move"]), done)
+
+    # ------------------------------------------------- Herunterladen / ZIP
+    def _download(self, path, name, is_dir, as_zip):
+        start = self.cfg.get("download_dir") or os.path.join(os.path.expanduser("~"), "Downloads")
+        if not os.path.isdir(start):
+            start = os.path.expanduser("~")
+        if as_zip:
+            base = name if is_dir else os.path.splitext(name)[0]
+            target = filedialog.asksaveasfilename(
+                parent=self, title="Als ZIP speichern", initialdir=start, initialfile=base + ".zip",
+                defaultextension=".zip", filetypes=[("ZIP-Archiv", "*.zip")],
+            )
+        elif is_dir:
+            target = filedialog.askdirectory(parent=self, title=f"Wohin soll der Ordner „{name}“?", initialdir=start)
+        else:
+            target = filedialog.asksaveasfilename(
+                parent=self, title="Datei speichern", initialdir=start, initialfile=name
+            )
+        if not target:
+            return
+        self.cfg["download_dir"] = os.path.dirname(target) if (as_zip or not is_dir) else target
+        save_config(self.cfg)
+        tresor = self.tresor()
+
+        def job():
+            if not is_dir and not as_zip:
+                data, _ = tresor.gh.get_file(path)
+                if data is None:
+                    raise ValueError("Die Datei gibt es nicht mehr.")
+                with open(target, "wb") as f:
+                    f.write(data)
+                return 1
+            progress = lambda i, n, rel: self.jobs.put(("status", f"Lade herunter ({i}/{n}): {rel} …"))  # noqa: E731
+            return tresor.download(path, target, as_zip=as_zip, progress=progress)
+
+        def done(count):
+            shown = target if (as_zip or not is_dir) else os.path.join(target, name)
+            self.set_status(f"✔ {count} Datei{'en' if count != 1 else ''} gespeichert: {shown}")
+            if hasattr(os, "startfile"):  # Windows: Ordner mit dem Ergebnis öffnen
+                try:
+                    os.startfile(os.path.dirname(shown) if (as_zip or not is_dir) else shown)
+                except OSError:
+                    pass
+
+        self.run_job(f"Lade „{name}“ herunter", job, done)
+
     # ------------------------------------------------------- Rechtsklick
     def _context_menu(self, event):
         lb = event.widget
@@ -2212,16 +2292,45 @@ class App(BaseTk):
             open_label, edit_label = "↗  Auf GitHub öffnen", "✎  Umbenennen"
             opener = self._open_selected_file
             row = self._file_rows[lb.nearest(event.y)] if on_item else None
+            if self.clip:
+                verb = "Verschieben" if self.clip["move"] else "Einfügen"
+                menu.add_command(
+                    label=f"📋  {verb}: „{self.clip['name']}“ hierher{where}",
+                    command=lambda: self._paste(self.files_cwd),
+                )
+            if not row and self._file_rows:
+                here = self.files_cwd.rsplit("/", 1)[-1] if self.files_cwd else self.folder
+                menu.add_command(
+                    label="🗜  Alles hier als ZIP herunterladen …",
+                    command=lambda: self._download(self._files_path(self.files_cwd), here, True, True),
+                )
             if row and row["type"] == "up":
                 on_item = False
                 menu.add_separator()
                 menu.add_command(label="⬆  Zurück", command=lambda: opener(None))
             elif row and row["type"] == "dir":
                 on_item = False
+                path, name = self._files_path(row["rel"]), row["rel"].rsplit("/", 1)[-1]
                 menu.add_separator()
                 menu.add_command(label="📂  Öffnen", command=lambda: opener(None))
+                if self.clip:
+                    menu.add_command(
+                        label=f"📋  „{self.clip['name']}“ in diesen Ordner {'verschieben' if self.clip['move'] else 'einfügen'}",
+                        command=lambda r=row: self._paste(r["rel"]),
+                    )
+                menu.add_command(label="✂  Ausschneiden", command=lambda: self._set_clip(path, name, True, True))
+                menu.add_command(label="⧉  Kopieren", command=lambda: self._set_clip(path, name, True, False))
+                menu.add_command(label="💾  Ordner herunterladen …", command=lambda: self._download(path, name, True, False))
+                menu.add_command(label="🗜  Als ZIP herunterladen …", command=lambda: self._download(path, name, True, True))
                 menu.add_command(label="✎  Ordner umbenennen", command=lambda r=row: self._rename_files_dir(r))
                 menu.add_command(label="🗑  Ganzen Ordner entfernen", command=lambda r=row: self._delete_files_dir(r))
+            elif row:
+                path, name = row["item"][1], row["item"][1].rsplit("/", 1)[-1]
+                menu.add_separator()
+                menu.add_command(label="✂  Ausschneiden", command=lambda: self._set_clip(path, name, False, True))
+                menu.add_command(label="⧉  Kopieren", command=lambda: self._set_clip(path, name, False, False))
+                menu.add_command(label="💾  Herunterladen …", command=lambda: self._download(path, name, False, False))
+                menu.add_command(label="🗜  Als ZIP herunterladen …", command=lambda: self._download(path, name, False, True))
         if on_item:
             menu.add_separator()
             menu.add_command(label=open_label, command=lambda: opener(None))
